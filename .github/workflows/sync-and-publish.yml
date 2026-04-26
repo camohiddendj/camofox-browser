@@ -1,0 +1,132 @@
+name: Sync upstream and publish GHCR
+
+on:
+  schedule:
+    - cron: '37 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: sync-upstream-and-publish-ghcr
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: jo-inc/camofox-browser
+  IMAGE_NAME: camofox-browser
+
+jobs:
+  sync-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out automation branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync master from upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "camohiddendj"
+          git config user.email "camo@hiddendj.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+          git fetch origin master
+          git fetch upstream master
+
+          git checkout -B master origin/master
+          git merge --no-edit upstream/master
+          git push origin master
+
+      - name: Find latest upstream release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --force --tags upstream 'refs/tags/v*:refs/tags/v*'
+          latest="$(git tag --list 'v[0-9]*' --sort=version:refname | tail -n 1)"
+
+          if [[ -z "${latest}" ]]; then
+            echo "::error::No upstream release tags found."
+            exit 1
+          fi
+
+          echo "tag=${latest}" >> "${GITHUB_OUTPUT}"
+          echo "version=${latest#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Check GHCR tag
+        id: ghcr
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/${IMAGE_NAME}"
+
+          if docker buildx imagetools inspect "${image}:${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "Found ${image}:${RELEASE_TAG}; skipping build."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            echo "Missing ${image}:${RELEASE_TAG}; building."
+          fi
+
+      - name: Set up QEMU
+        if: steps.ghcr.outputs.exists != 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build and publish latest missing release
+        if: steps.ghcr.outputs.exists != 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/${IMAGE_NAME}"
+
+          git checkout --force "${RELEASE_TAG}"
+
+          make fetch-x86
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg ARCH=x86_64 \
+            --tag "${image}:${RELEASE_TAG}-amd64" \
+            --push \
+            .
+
+          make fetch-arm64
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg ARCH=aarch64 \
+            --tag "${image}:${RELEASE_TAG}-arm64" \
+            --push \
+            .
+
+          docker buildx imagetools create \
+            --tag "${image}:${RELEASE_TAG}" \
+            --tag "${image}:${RELEASE_VERSION}" \
+            --tag "${image}:latest" \
+            "${image}:${RELEASE_TAG}-amd64" \
+            "${image}:${RELEASE_TAG}-arm64"

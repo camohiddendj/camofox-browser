@@ -16,6 +16,7 @@ concurrency:
 env:
   UPSTREAM_REPO: jo-inc/camofox-browser
   IMAGE_NAME: camofox-browser
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   sync-and-publish:

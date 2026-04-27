@@ -77,18 +77,38 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
 
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           image="ghcr.io/${owner}/${IMAGE_NAME}"
+          missing=()
 
-          if docker buildx imagetools inspect "${image}:${RELEASE_TAG}" >/dev/null 2>&1; then
+          required_tags=(
+            "${RELEASE_TAG}"
+            "${RELEASE_VERSION}"
+            "latest"
+            "${RELEASE_TAG}-amd64"
+            "${RELEASE_TAG}-arm64"
+            "${RELEASE_VERSION}-amd64"
+            "${RELEASE_VERSION}-arm64"
+            "amd64"
+            "arm64"
+          )
+
+          for tag in "${required_tags[@]}"; do
+            if ! docker buildx imagetools inspect "${image}:${tag}" >/dev/null 2>&1; then
+              missing+=("${tag}")
+            fi
+          done
+
+          if [[ "${#missing[@]}" -eq 0 ]]; then
             echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "Found ${image}:${RELEASE_TAG}; skipping build."
+            echo "All required tags already exist for ${RELEASE_TAG}; skipping build."
           else
             echo "exists=false" >> "${GITHUB_OUTPUT}"
-            echo "Missing ${image}:${RELEASE_TAG}; building."
+            printf 'Missing %s tags: %s\n' "${image}" "${missing[*]}"
           fi
 
       - name: Set up QEMU
@@ -114,6 +134,8 @@ jobs:
             --platform linux/amd64 \
             --build-arg ARCH=x86_64 \
             --tag "${image}:${RELEASE_TAG}-amd64" \
+            --tag "${image}:${RELEASE_VERSION}-amd64" \
+            --tag "${image}:amd64" \
             --push \
             .
 
@@ -122,6 +144,8 @@ jobs:
             --platform linux/arm64 \
             --build-arg ARCH=aarch64 \
             --tag "${image}:${RELEASE_TAG}-arm64" \
+            --tag "${image}:${RELEASE_VERSION}-arm64" \
+            --tag "${image}:arm64" \
             --push \
             .
 
